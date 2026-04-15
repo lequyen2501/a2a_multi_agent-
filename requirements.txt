@@ -1,0 +1,6 @@
+beeai-framework
+uvicorn
+python-dotenv
+requests
+fastapi
+pydantic
