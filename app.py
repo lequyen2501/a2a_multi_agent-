@@ -1,229 +1,225 @@
 from __future__ import annotations
-import io
+
 import asyncio
-import os
-from dotenv import load_dotenv
+import re
 
-from beeai_framework.middleware.trajectory import GlobalTrajectoryMiddleware
-from beeai_framework.backend import ChatModel
-from beeai_framework.memory.unconstrained_memory import UnconstrainedMemory
-from beeai_framework.tools import Tool
-from beeai_framework.tools.handoff import HandoffTool
-from beeai_framework.tools.think import ThinkTool
+import streamlit as st
 
-from beeai_framework.adapters.a2a.serve.server import A2AServer, A2AServerConfig
-from beeai_framework.adapters.a2a.agents import A2AAgent
-from beeai_framework.agents.requirement import RequirementAgent
-from beeai_framework.agents.requirement.requirements.conditional import ConditionalRequirement
-from beeai_framework.serve.utils import LRUMemoryManager
-
-from common import build_parser, env_int, env_str, maybe_load_env
+from common import maybe_load_env
+from router_agent import RouterBeeAI
 
 
-# =============================
-# 🔍 TRACE SUMMARY (fix lỗi app)
-# =============================
-KNOWN_AGENT_NAMES = ("MathAgent", "WeatherAgent", "ResearchAgent")
+def extract_trace_details(trace: str) -> dict[str, str]:
+    patterns = {
+        "route": r"^ROUTE:\s*(.+)$",
+        "called": r"^CALLED:\s*(.+)$",
+        "fallback": r"^ROUTER_FALLBACK:\s*(.+)$",
+        "task_status": r"^TASK_STATUS:\s*(.+)$",
+        "synthesized_by": r"^SYNTHESIZED_BY:\s*(.+)$",
+        "agent_error": r"^AGENT_ERROR:\s*(.+)$",
+    }
+    details: dict[str, str] = {}
+    for key, pattern in patterns.items():
+        match = re.search(pattern, trace, flags=re.MULTILINE)
+        if match:
+            details[key] = match.group(1).strip()
+    return details
 
 
-def summarize_trace(trace_text: str) -> dict[str, list[str]]:
-    used: list[str] = []
-    missing: list[str] = []
-
-    trace_lower = (trace_text or "").lower()
-
-    for name in KNOWN_AGENT_NAMES:
-        if name.lower() in trace_lower:
-            used.append(name)
-        else:
-            missing.append(name)
-
-    return {"used": used, "missing": missing}
+def run_router(prompt: str) -> tuple[str, str]:
+    return asyncio.run(RouterBeeAI().answer(prompt))
 
 
-# =============================
-# 🚀 ROUTER
-# =============================
-class RouterBeeAI:
-    def __init__(self) -> None:
-        load_dotenv()
-        self._load_config()
+def init_state() -> None:
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-    def _load_config(self) -> None:
-        # 👇 multi-model fallback
-        self.models = [
-            os.getenv("GEMINI_CHAT_MODEL", "gemini-3.1-flash-lite-preview").strip(),
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-        ]
 
-        self.math_url = os.getenv("MATH_AGENT_URL", "http://127.0.0.1:9101").rstrip("/")
-        self.weather_url = os.getenv("WEATHER_AGENT_URL", "http://127.0.0.1:9102").rstrip("/")
-        self.research_url = os.getenv("RESEARCH_AGENT_URL", "http://127.0.0.1:9103").rstrip("/")
+def render_page() -> None:
+    st.set_page_config(
+        page_title="Router Chat Demo",
+        page_icon="AI",
+        layout="centered",
+        initial_sidebar_state="collapsed",
+    )
+    st.markdown(
+        """
+        <style>
+            .stApp {
+                background:
+                    radial-gradient(circle at top, rgba(255,123,84,0.18), transparent 22%),
+                    linear-gradient(180deg, #0f1117 0%, #121722 100%);
+            }
+            .block-container {
+                max-width: 860px;
+                padding-top: 1.2rem;
+                padding-bottom: 2rem;
+            }
+            .topbar {
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 22px;
+                padding: 1rem 1.1rem;
+                background: rgba(255,255,255,0.03);
+                margin-bottom: 1rem;
+                box-shadow: 0 16px 40px rgba(0,0,0,0.20);
+            }
+            .title {
+                font-size: 1.7rem;
+                font-weight: 700;
+                color: #ffffff;
+                margin-bottom: 0.25rem;
+            }
+            .subtitle {
+                color: #aab4c7;
+                font-size: 0.96rem;
+                line-height: 1.5;
+            }
+            .agent-strip {
+                display: flex;
+                gap: 0.65rem;
+                flex-wrap: wrap;
+                margin-top: 0.8rem;
+            }
+            .agent-pill {
+                border: 1px solid rgba(255,255,255,0.10);
+                background: rgba(255,255,255,0.04);
+                color: #f8f8fb;
+                border-radius: 999px;
+                padding: 0.42rem 0.75rem;
+                font-size: 0.88rem;
+            }
+            .answer-box {
+                border: 1px solid rgba(255,255,255,0.08);
+                background: linear-gradient(135deg, rgba(255,132,92,0.16), rgba(255,255,255,0.04));
+                border-radius: 18px;
+                padding: 0.95rem 1rem;
+                margin-top: 0.35rem;
+            }
+            .answer-label {
+                color: #ffbd9d;
+                font-size: 0.76rem;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                margin-bottom: 0.45rem;
+            }
+            .answer-text {
+                color: #fff8f3;
+                line-height: 1.65;
+                font-size: 1rem;
+            }
+            .hint {
+                color: #96a2b6;
+                font-size: 0.92rem;
+                margin-top: 0.6rem;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div class="topbar">
+            <div class="title">Router Chat Demo</div>
+            <div class="subtitle">
+                Giao dien demo dang chatbot. Moi cau hoi se duoc Router xu ly, Gemma chon sub-agent phu hop,
+                sau do tra lai cau tra loi cuoi.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        print("Router models:", self.models)
 
-    async def _create_agents(self):
-        math_agent = A2AAgent(url=self.math_url, memory=UnconstrainedMemory())
-        weather_agent = A2AAgent(url=self.weather_url, memory=UnconstrainedMemory())
-        research_agent = A2AAgent(url=self.research_url, memory=UnconstrainedMemory())
-
-        await asyncio.gather(
-            math_agent.check_agent_exists(),
-            weather_agent.check_agent_exists(),
-            research_agent.check_agent_exists(),
+def render_sidebar() -> None:
+    with st.sidebar:
+        st.markdown("### Demo Control")
+        if st.button("Xoa lich su", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
+        st.markdown("---")
+        st.markdown("### Agent map")
+        st.markdown(
+            """
+            - `math` -> MathAgent
+            - `weather` -> WeatherAgent
+            - `research` -> ResearchAgent
+            - Gemma -> route + synthesize
+            """
         )
 
-        return math_agent, weather_agent, research_agent
 
-    def _create_tools(self, math_agent, weather_agent, research_agent):
-        return [
-            ThinkTool(),
-            HandoffTool(
-                target=math_agent,
-                name=math_agent.name,
-                description=math_agent.agent_card.description or "Giải toán",
-            ),
-            HandoffTool(
-                target=weather_agent,
-                name=weather_agent.name,
-                description=weather_agent.agent_card.description or "Thời tiết",
-            ),
-            HandoffTool(
-                target=research_agent,
-                name=research_agent.name,
-                description=research_agent.agent_card.description or "Research",
-            ),
-        ]
+def render_messages() -> None:
+    for item in st.session_state.messages:
+        with st.chat_message("user"):
+            st.markdown(item["prompt"])
 
-    def _get_instructions(self, math, weather, research):
-        return f"""
-Bạn là Router Agent.
+        with st.chat_message("assistant"):
+            st.markdown(
+                f"""
+                <div class="answer-box">
+                    <div class="answer-label">Cau tra loi</div>
+                    <div class="answer-text">{item["answer"]}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-BẮT BUỘC:
-1. ThinkTool
-2. Gọi HandoffTool
-3. ThinkTool
-4. Trả lời
+            route = item["details"].get("route", "unknown")
+            called = item["details"].get("called", "unknown")
+            fallback = item["details"].get("fallback")
+            task_status = item["details"].get("task_status", "unknown")
+            synthesized_by = item["details"].get("synthesized_by")
+            agent_error = item["details"].get("agent_error")
 
-Chọn:
-- toán → {math}
-- thời tiết → {weather}
-- kiến thức → {research}
+            pills = [
+                f'<div class="agent-pill">Task: {task_status}</div>',
+                f'<div class="agent-pill">Gemma route: {route}</div>',
+                f'<div class="agent-pill">Sub-agent: {called}</div>',
+            ]
+            if synthesized_by:
+                pills.append(f'<div class="agent-pill">Synthesize: {synthesized_by}</div>')
+            if fallback:
+                pills.append(f'<div class="agent-pill">Fallback: {fallback}</div>')
+            if agent_error:
+                pills.append(f'<div class="agent-pill">Error: {agent_error}</div>')
 
-Không được trả lời trực tiếp.
-""".strip()
-
-    async def _build_agent(self, model_name: str):
-        math_agent, weather_agent, research_agent = await self._create_agents()
-        tools = self._create_tools(math_agent, weather_agent, research_agent)
-
-        return RequirementAgent(
-            name="RouterAgent",
-            description="Router multi-agent",
-            llm=ChatModel.from_name(f"gemini:{model_name}"),
-            tools=tools,
-            requirements=[
-                ConditionalRequirement(
-                    ThinkTool,
-                    force_at_step=1,
-                    force_after=[Tool],
-                    consecutive_allowed=False,
-                )
-            ],
-            memory=UnconstrainedMemory(),
-            role="A2A Router",
-            instructions=self._get_instructions(
-                math_agent.name,
-                weather_agent.name,
-                research_agent.name,
-            ),
-        )
-
-    async def answer(self, prompt: str):
-        prompt = (prompt or "").strip()
-        if not prompt:
-            return "Hỏi gì đó đi.", ""
-
-        last_error = None
-
-        for model_name in self.models:
-            try:
-                print(f"👉 Trying model: {model_name}")
-
-                agent = await self._build_agent(model_name)
-
-                trace_buffer = io.StringIO()
-
-                result = await agent.run(prompt).middleware(
-                    GlobalTrajectoryMiddleware(
-                        included=[Tool],
-                        pretty=True,
-                        target=trace_buffer,
-                    )
-                )
-
-                self.model_name = model_name
-                return result.last_message.text, trace_buffer.getvalue()
-
-            except Exception as exc:
-                print(f"❌ Model failed: {model_name} -> {exc}")
-                last_error = exc
-                await asyncio.sleep(1)
-
-        return f"Tất cả model lỗi: {last_error}", ""
+            st.markdown(
+                f'<div class="agent-strip">{"".join(pills)}</div>',
+                unsafe_allow_html=True,
+            )
 
 
-# =============================
-# CLI
-# =============================
-async def run_cli():
-    router = RouterBeeAI()
-    print("Router CLI")
-
-    while True:
-        try:
-            prompt = input(">>> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-
-        if prompt.lower() in {"exit", "quit"}:
-            break
-
-        answer, trace = await router.answer(prompt)
-
-        print("===== ANSWER =====")
-        print(answer)
-
-        print("\n===== TRACE =====")
-        print(trace)
-
-
-# =============================
-# SERVER
-# =============================
-def serve():
-    router = RouterBeeAI()
-    agent = asyncio.run(router._build_agent(router.models[0]))
-
-    host = env_str("AGENT_HOST", "127.0.0.1")
-    port = env_int("ROUTER_AGENT_PORT", 9100)
-
-    A2AServer(
-        config=A2AServerConfig(host=host, port=port, protocol="jsonrpc"),
-        memory_manager=LRUMemoryManager(maxsize=100),
-    ).register(agent, send_trajectory=True).serve()
-
-
-def main():
+def main() -> None:
     maybe_load_env()
-    parser = build_parser("Router Agent")
-    args = parser.parse_args()
+    init_state()
+    render_page()
+    render_sidebar()
 
-    if args.cli:
-        asyncio.run(run_cli())
-    else:
-        serve()
+    st.markdown(
+        """
+        <div class="hint">
+            Ban co the chat nhu binh thuong. UI se chi hien agent nao da duoc goi, khong hien trace dai.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    render_messages()
+
+    prompt = st.chat_input("Nhap cau hoi...")
+    if prompt:
+        with st.spinner("Router dang xu ly..."):
+            answer, trace = run_router(prompt)
+
+        details = extract_trace_details(trace)
+        st.session_state.messages.append(
+            {
+                "prompt": prompt,
+                "answer": answer,
+                "details": details,
+            }
+        )
+        st.rerun()
 
 
 if __name__ == "__main__":

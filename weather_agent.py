@@ -216,20 +216,19 @@ class WeatherAgentExecutor(AgentExecutor, AgentAppMixin):
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
         if self.agent.needs_location(prompt):
-            await updater.update_status(
-                TaskState.input_required,
+            await updater.requires_input(
                 new_agent_text_message(self.agent.ask_for_location(), task.context_id, task.id),
-                final=True,
             )
             return
 
         try:
+            await updater.start_work()
             location = self.agent.normalize_location(prompt)
             content = self.agent.get_weather(location)
             await updater.complete(new_agent_text_message(content, task.context_id, task.id))
         except Exception as exc:
             message = f"Khong lay duoc thoi tiet: {exc}"
-            await updater.complete(new_agent_text_message(message, task.context_id, task.id))
+            await updater.failed(new_agent_text_message(message, task.context_id, task.id))
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         return None

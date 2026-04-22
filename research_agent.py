@@ -1,15 +1,14 @@
 from __future__ import annotations
+
 import asyncio
 import os
-from dotenv import load_dotenv
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
-from a2a.types import TaskState
 from a2a.utils import new_agent_text_message, new_task
-
 from beeai_framework.backend import ChatModel, SystemMessage, UserMessage
+from dotenv import load_dotenv
 
 from common import AgentAppMixin, build_parser, env_int, maybe_load_env, run_a2a_server
 
@@ -18,29 +17,33 @@ class ResearchAgentCore:
     def __init__(self) -> None:
         load_dotenv()
 
-        self.model_name = os.getenv(
-            "GEMINI_CHAT_MODEL",
-            "gemini-2.5-flash"
+        configured_model = (
+            os.getenv("RESEARCH_MODEL")
+            or os.getenv("GEMINI_CHAT_MODEL")
+            or "gemini-2.5-flash-lite"
         ).strip()
-        print(f"Model string: 'gemini:{self.model_name}'")
-        self.model = ChatModel.from_name(
-            f"gemini:{self.model_name}"
-)
+        self.model_name = (
+            configured_model
+            if ":" in configured_model
+            else f"gemini:{configured_model}"
+        )
+        print(f"Research model: {self.model_name}")
+        self.model = ChatModel.from_name(self.model_name)
 
     async def research_async(self, query: str) -> str:
         query = (query or "").strip()
         if not query:
-            return "Bạn muốn research chủ đề gì?"
+            return "Ban muon research chu de gi?"
 
         output = await self.model.run(
             [
-                SystemMessage("Bạn là research assistant. Trả lời tiếng Việt ngắn gọn."),
-                UserMessage(f"Hãy research: {query}")
+                SystemMessage("Ban la research assistant. Tra loi tieng Viet ngan gon, ro rang."),
+                UserMessage(f"Hay research: {query}"),
             ],
-            temperature=0.2
+            temperature=0.2,
         )
 
-        return output.get_text_content().strip() or "Không có kết quả"
+        return output.get_text_content().strip() or "Khong co ket qua."
 
     def research(self, query: str) -> str:
         return asyncio.run(self.research_async(query))
@@ -64,18 +67,27 @@ class ResearchAgentExecutor(AgentExecutor, AgentAppMixin):
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
         if not prompt:
-            await updater.update_status(
-                TaskState.input_required,
+            await updater.requires_input(
                 new_agent_text_message(
-                    "Bạn muốn research chủ đề gì?",
+                    "Ban muon research chu de gi?",
                     task.context_id,
-                    task.id
+                    task.id,
                 ),
-                final=True,
             )
             return
 
-        result = await self.agent.research_async(prompt)
+        try:
+            await updater.start_work()
+            result = await self.agent.research_async(prompt)
+        except Exception as exc:
+            await updater.failed(
+                new_agent_text_message(
+                    f"ResearchAgent gap loi: {exc}",
+                    task.context_id,
+                    task.id,
+                )
+            )
+            return
 
         await updater.complete(
             new_agent_text_message(result, task.context_id, task.id)
@@ -87,7 +99,7 @@ class ResearchAgentExecutor(AgentExecutor, AgentAppMixin):
 
 def run_cli() -> None:
     agent = ResearchAgentCore()
-    print("ResearchAgent CLI (Gemini)")
+    print("ResearchAgent CLI")
 
     while True:
         try:
@@ -97,8 +109,13 @@ def run_cli() -> None:
 
         if q.lower() in {"exit", "quit"}:
             break
-    print(agent.research(q))
-    print()
+
+        print(agent.research(q))
+        print()
+
+
+def run_expr(expr: str) -> None:
+    print(ResearchAgentCore().research(expr))
 
 
 def main() -> None:
@@ -110,6 +127,10 @@ def main() -> None:
         run_cli()
         return
 
+    if args.expr:
+        run_expr(args.expr)
+        return
+
     host = os.getenv("AGENT_HOST", "127.0.0.1")
     port = env_int("RESEARCH_AGENT_PORT", 9103)
 
@@ -117,7 +138,7 @@ def main() -> None:
         ResearchAgentExecutor(),
         ResearchAgentExecutor(),
         host,
-        port
+        port,
     )
 
 
